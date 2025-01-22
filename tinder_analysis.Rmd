@@ -1,0 +1,334 @@
+---
+title: "Tinder Analysis"
+author: "Ethan Gandiboyina, Sean Paulo, Daniel Mon , Nhi Nguyen"
+date: "2025-01-22"
+output: html_document
+---
+
+```{r,echo = FALSE}
+library(FactoMineR)
+library(factoextra)
+library(dplyr)
+library(ggplot2)
+library(corrplot)
+library(GGally)
+library(caret)
+library(ggsci)
+library(mclust)
+library(pROC)
+library(plotly)
+tinder<-read.csv("D:/School Stuff/Tinder Analysis/Tinder_Analysis/tinder_users.db - pays.csv")
+
+str(tinder)
+```
+
+
+Subsetting the data to preform MCA and PCA:
+```{r}
+# Removing date columns that won't be used for analysis
+date_cols <- c("last.up.photo", "last.pr.update", "last.connex", "date.crea","Country","userid")
+tinder <- tinder %>% 
+  select(-all_of(date_cols))
+
+# Define the qualitative variable names
+qualitative <- c( "photo.beach", "photo.elevator", "laugh", "voyage", "gender")
+
+# Select qualitative columns from the `tinder` DataFrame
+tinder_qualitative <- tinder %>% 
+  select(all_of(qualitative))
+
+# Select quantitative columns from the `tinder` DataFrame
+tinder_quantitative <- tinder %>%
+  select(-all_of(qualitative))
+
+
+head(tinder_quantitative)
+
+tinder_qualitative_df <- as.data.frame(tinder_qualitative)
+tinder_quantitative_df <- as.data.frame(tinder_quantitative)
+```
+
+```{r}
+# Convert columns to factors 
+tinder_qualitative <- tinder_qualitative %>%
+  mutate(across(everything(), as.factor))
+```
+
+Preforming a pca on the quantitative variables of the data set:
+```{r}
+tinder_pca<-prcomp(tinder_quantitative,scale=TRUE)
+```
+
+Seeing the number of principle components needed to do analysis:
+```{r}
+# Compute variance and proportion of variance explained
+tinder_var <- tinder_pca$sdev^2
+tinder_pve <- tinder_var / sum(tinder_var)
+
+# Create elbow plot
+plot(tinder_pve, 
+     type = "b", 
+     xlab = "# of components", 
+     ylab = "% Variance explained", 
+     ylim = c(0, 1), 
+     main = "Elbow Plot of PCA", 
+     pch = 19, col = "blue")
+```
+The elbow plot doesn't show a clear inflection point. However, the variance explained by 2 principle components only sums to about 60%. This suggests that we shouldn't reduce the dimensions of the dataset.
+
+
+Preforming MCA:
+
+```{r} 
+# Perform MCA
+head(tinder_qualitative)
+tinder_mca <- MCA(tinder_qualitative, graph = FALSE)
+#projecting components on pc 1 and 2
+fviz_pca_var(tinder_mca, col.var = "red",xlab='PC 1',ylab='PC 2')
+```
+ 
+Here we several vectors whose magnitude projection onto an axis represents the contribution a factor has on a specific principle component. Here we see values such Gender_1 and photo.beach_1 having significance on PC 1 while having no bearing on PC 2. Vectors with smaller magnitudes aren't significant in the graphed PC's, but this doesn't mean that they're irrelevant... 
+   
+
+To illustrate this we can print the contribution table:
+```{r}
+variable_contributions<-tinder_mca$var$contrib
+
+# Subsetting the first 2 pc's and converting to a df to print neatly
+contribution_table <- as.data.frame(variable_contributions[, 1:5])
+print(contribution_table, row.names = TRUE)
+fviz_contrib(tinder_mca, choice = "var", axes = 1:5)
+```
+This table shows the percentage of information contributed to each PC by each variable. Going off of the variable Gender_2, we can see that it composes ~1% of PC1 but 55% of pc2's variance.
+
+Looking more broadly, we can see the % of variance explained by each principle component. This essentially tells us how many pc's are needed to model the original data. In this case, if we used 5 pc's we could model the original data with up to 86% accuracy. 
+```{r}
+inertia<-as.data.frame(tinder_mca$eig)
+print(inertia)
+```
+
+The inertia of the eigenvalues/principle components are relatively similar to the pca.
+
+
+```{r}
+# Assuming 'tinder_mca' contains your MCA analysis result
+fviz_screeplot(tinder_mca, addlabels = TRUE, main = "Elbow Plot for MCA",ylim=c(0,30))
+
+head((tinder_mca$ind$coord))
+```
+ 
+
+A factor mapping on the PC's show us the significance of each factor on a specific principle component. In real life this tells us that having a laughing photo in your profile doesn't significantly impact the score of the profile, whereas having a photo from a trip, or beach are more likely to impact profile score.
+
+Factor mapping of qualitative variables:
+Plotting the points of individuals on a factorial plane:
+```{r}  
+# Plot individuals
+fviz_mca_ind(tinder_mca, 
+             repel = TRUE,        # Avoid text overlap
+             col.ind = "blue",    # Color of individuals
+             geom = "point",      # Show points for individuals
+             title = "Individuals on the Factorial Plane")
+```
+Now using our principle components we will cluster the data. In this scenario, clustering will form groups consisting of profiles with similar characteristics.
+
+Looking at the graph above, the data seems to be grouped into four groups.
+Due to the nature of this data, it seems that k-means,hierarchical clustering would be the best method to cluster this data.
+
+Preforming K-means:
+```{r}
+#calculating the cluster using kmeans
+set.seed(321)
+kmeans_qual <- kmeans(tinder_mca$ind$coord, centers = 4)
+
+# Convert cluster assignments to factor (discrete variable)
+kmeans_clusters <- factor(kmeans_qual$cluster)
+
+# Visualize K-means clusters on the MCA factorial plane
+fviz_mca_ind(tinder_mca, 
+             col.ind = kmeans_clusters,    # Color points by clusters (discrete factor)
+             palette = "jco",              # Choose color palette
+             addEllipses = TRUE,           # Add ellipses for clusters
+             repel = TRUE,                 # Avoid label overlap
+             label = "none",               # Remove data labels
+             arrow = FALSE,                # Remove arrows
+             title = "K-means Clustering on MCA")
+```
+This grouping doesn't look right, lets try hierarchical clustering...
+
+```{r}
+# Perform hierarchical clustering (using Euclidean distance and complete linkage)
+dist_mca <- dist(tinder_mca$ind$coord)  # Compute distance matrix
+hclust_qual <- hclust(dist_mca, method = "complete")  # Perform hierarchical clustering
+
+# Cut the dendrogram to create 4 clusters
+hclust_clusters <- cutree(hclust_qual, k = 4)  # 
+
+# Convert hierarchical cluster assignments to factor (discrete variable)
+hclust_clusters_factor <- factor(hclust_clusters)
+
+# Visualize hierarchical clustering on the MCA factorial plane
+fviz_mca_ind(tinder_mca, 
+             col.ind = hclust_clusters_factor,    # Color points by clusters
+             palette = "jco",                     # Choose color palette
+             addEllipses = TRUE,                  # Add ellipses for clusters
+             repel = TRUE,                        # Avoid label overlap
+             label = "none",                      # Remove data labels
+             arrow = FALSE,                       # Remove arrows
+             title = "Hierarchical Clustering on MCA")
+```
+This gives a similar result to the kmeans clustering. To get a better understanding on why the clustering is the way that it is, we can try plotting the clusters using 3 pc's.
+
+```{r}
+# Extract the first three dimensions from the MCA coordinates
+mca_3d_coords <- tinder_mca$ind$coord[, 1:3]  # Assuming MCA has at least 3 dimensions
+
+# Create a 3D scatter plot
+plot <- plot_ly(
+  x = ~mca_3d_coords[, 1], 
+  y = ~mca_3d_coords[, 2], 
+  z = ~mca_3d_coords[, 3], 
+  type = "scatter3d", 
+  mode = "markers",
+  color = ~kmeans_clusters,  # Color by clusters
+  colors = "Set2"           # Color palette
+)
+
+# Add layout
+plot <- plot %>% layout(
+  title = "3D K-means Clustering on MCA",
+  scene = list(
+    xaxis = list(title = "Dim 1"),
+    yaxis = list(title = "Dim 2"),
+    zaxis = list(title = "Dim 3")
+  )
+)
+
+# Print the plot
+plot
+```
+In this graph we see that in 3 dimensions that the data doesn't follow the pattern that graphing in 2d followed.
+*Note this graph actually contains 3000 observations. Since the data of the MCA is formed by factors, there are many 
+points that overlap.
+
+
+
+Now lets analyse on the PCA:
+
+Lets what quantitative variables are correlated:
+```{r}
+ coor_plot<-ggcorr(
+   data=tinder_quantitative,
+   label=TRUE)
+ print(coor_plot)
+```
+The only variables that have a significant relationship are the "n.matches" and the "score". This is since score is in part calculated by using n matches.
+
+Using the MCA we can visualize the contribution of each qualitative variable on the pc's:
+```{r}
+fviz_pca_var(
+  tinder_pca,col.var = "contrib",gradient.cols=c("blue","purple","red"),rapel=TRUE
+)
+```
+
+
+Here we can once again see the percentge of varience explained by the individual pc's
+
+```{r}
+inertia_pca<-as.data.frame(tinder_pca$eig)
+print(inertia)
+
+```
+
+To group users, we can plot them on a plane of pc's. In doing this we can hopefully see a pattern between user characteristics and the number of matches they have.
+
+Plotting People on a factorial plane:
+
+```{r}
+
+# Plot individuals on the first two dimensions (Dim 1 and Dim 2)
+fviz_pca_ind(
+  tinder_pca,
+  axes = c(1, 2),       # Dimensions to plot
+  geom.ind = "point",   # Use points for individuals
+  col.ind = tinder$n.matches,     # Color by the quality of representation (cos2)
+  gradient.cols = c("yellow", "orange", "red"),  # Color gradient
+  repel = TRUE          # Avoid overlapping labels
+) +
+ggtitle("Individuals on the Factorial Plane (Dim 1 vs Dim 2)")
+```
+Here we can see that there is a positive correlation between dim 1 and the user score which is represented by the color. 
+
+To get more information on users we can cluster them by all principle components.
+
+Lets see how many clusters we should use an elbow plot:
+```{r}
+str(tinder_pca)
+
+pca_coords <- as.data.frame(tinder_pca$x[, 1:6])
+fviz_nbclust(pca_coords, kmeans, method = "wss")  # Elbow method
+```
+
+I decided to use 6 clusters for the Gaussian Mixture and K-means model so that we get moderate variation between clusters, while maintaining a decent square error. At 6 clusters there is on average a squared error of ~3 matches. 
+```{r}
+# Load required libraries
+library(FactoMineR)
+library(factoextra)
+
+# Perform K-means clustering
+set.seed(42)  # Set seed for reproducibility
+kmeans_result <- kmeans(pca_coords, centers = 6, nstart = 250)  # Adjust 'centers' as needed
+
+# View clustering results
+print(kmeans_result)
+
+# Add clusters to the PCA result for visualization
+fviz_pca_ind(
+  tinder_pca,
+  geom.ind = "point",        # Use points to represent individuals
+  col.ind = as.factor(kmeans_result$cluster),  # Color by clusters
+  palette = "Set2",          # Use a color palette
+  addEllipses = TRUE,        # Add confidence ellipses for clusters
+  legend.title = "Clusters"  # Title for the legend
+) +
+ggtitle("K-Means Clustering on PCA Coordinates")
+```
+
+```{r}
+gmm_result <- Mclust(pca_coords, G = 4)  # assigning 4 clusters
+pca_coords$Cluster <- as.factor(gmm_result$classification)  # For GMM
+
+```
+Comparing to another clustering method...
+```{r}
+ggplot(pca_coords, aes(x = PC1, y = PC2, color = Cluster)) +
+  geom_point(size = 2, alpha = 0.6) +
+  stat_ellipse(aes(fill = Cluster), alpha = 0.2, geom = "polygon") +
+  scale_color_brewer(palette = "Set1") +  # Color scheme
+  scale_fill_brewer(palette = "Set1") +   # Matching fill colors for ellipses
+  labs(
+    title = "Gaussian Mixture Model Clusters with Ellipses",
+    x = "Principal Component 1 (PC1)",
+    y = "Principal Component 2 (PC2)",
+    color = "Cluster",
+    fill = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    legend.position = "right"
+  )
+
+
+```
+Now we can plot the average measurements for each cluster...
+```{r}
+cluster_summary <- tinder_quantitative %>%
+  group_by(tinder_quantitative$Cluster) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE))%>%
+  arrange(desc(n.matches))
+print(cluster_summary)
+
+```
+ These clusters reinforce that the only quantitative factors (from this dataset) that can be used to  linearly predict the # of matches of a user is sent.ana, and n.updates.photo. However, it seems that there may be a non linear relationship between n.photos and score.
+ 
